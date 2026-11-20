@@ -22,6 +22,7 @@ import { ConfigGeneratorView } from './components/ConfigGeneratorView';
 import { LogsView } from './components/LogsView';
 import { Modal } from './components/Modal';
 import { SmartTroubleshooter } from './components/SmartTroubleshooter';
+import { HeaderHealthWidget } from './components/HeaderHealthWidget';
 
 type TabKey = 'overview' | 'cookies' | 'throttle' | 'playground' | 'settings' | 'configs' | 'logs';
 
@@ -51,6 +52,7 @@ export default function App() {
   const [statusData, setStatusData] = useState<FullStatusResponse | null>(null);
   const [fullSettings, setFullSettings] = useState<BridgeSettings | null>(null);
   const [loading, setLoading] = useState(true);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [toast, setToast] = useState<{ msg: string; tone: 'ok' | 'err' } | null>(null);
   const [troubleshooterOpen, setTroubleshooterOpen] = useState(false);
   const [lastErrorContext, setLastErrorContext] = useState<{ error: string; source: string } | null>(null);
@@ -74,6 +76,7 @@ export default function App() {
       ]);
       if (statusRes.ok) {
         setStatusData((await statusRes.json()) as FullStatusResponse);
+        setLastUpdatedAt(Date.now());
       }
       if (settingsRes.ok) {
         setFullSettings((await settingsRes.json()) as BridgeSettings);
@@ -88,6 +91,23 @@ export default function App() {
   useEffect(() => {
     void refreshAll();
   }, [refreshAll]);
+
+  // Real-time background health polling every 10s (silent, skips hidden tabs)
+  useEffect(() => {
+    const timer = setInterval(async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      try {
+        const res = await fetch('/api/control/status');
+        if (res.ok) {
+          setStatusData((await res.json()) as FullStatusResponse);
+          setLastUpdatedAt(Date.now());
+        }
+      } catch {
+        // Keep previous state visible; widget will reflect disconnection if persistent
+      }
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark);
@@ -155,6 +175,12 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            <HeaderHealthWidget
+              status={statusData}
+              loading={loading}
+              lastUpdatedAt={lastUpdatedAt}
+              onOpenTroubleshooter={() => setTroubleshooterOpen(true)}
+            />
             <button
               type="button"
               onClick={() => setTroubleshooterOpen(true)}
