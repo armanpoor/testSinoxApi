@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Web Bridge Control Center",
+  "description": "کنترل‌سنتر محلی، پروکسی تراتل ضدبن با استریم SSE و نگهبان اتمیک کوکی برای تبدیل اشتراک وب Gemini به API استاندارد OpenAI و Anthropic",
+  "requestFramePermissions": []
+}

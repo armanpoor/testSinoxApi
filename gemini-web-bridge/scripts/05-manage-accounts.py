@@ -132,8 +132,27 @@ def cmd_authuser(args):
     print(f"نتیجه: {r}")
 
 
+def cmd_harden(args):
+    """اعمال یک‌مرحله‌ای تنظیمات سخت‌شده ضدبن روی موتور 8093 (ادغام غیرمخرب)."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    from bridge_lib import ANTI_BAN_PRESET
+
+    op = opener()
+    cur = api(op, "GET", "/admin/api/config")
+    cfg = cur.get("config", {})
+    if not isinstance(cfg, dict):
+        sys.exit(f"❌ خواندن تنظیمات فعلی ناموفق بود: {cur}")
+    merged = {**cfg, **ANTI_BAN_PRESET}
+    res = api(op, "PUT", "/admin/api/config", merged)
+    if "error" in res:
+        sys.exit(f"❌ خطا در اعمال پروفایل ضدبن: {res}")
+    print("✅ پروفایل سخت‌شده ضدبن (concurrent=1, rpm=3, rph=40, strict_model=true, temporary_chat=true) اعمال شد.")
+
+
 def main():
-    ap = argparse.ArgumentParser(description="مدیریت Cookie Pool چند-اکانته")
+    ap = argparse.ArgumentParser(description="مدیریت Cookie Pool چند-اکانته و سخت‌سازی ضدبن")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("add")
@@ -158,6 +177,8 @@ def main():
     p = sub.add_parser("authuser"); p.add_argument("id", type=int)
     p.add_argument("n", type=int)
     p.set_defaults(fn=cmd_authuser)
+    p = sub.add_parser("harden", help="اعمال پروفایل سخت‌شده ضدبن روی موتور 8093")
+    p.set_defaults(fn=cmd_harden)
 
     args = ap.parse_args()
     if args.cmd in ("enable", "disable") and not hasattr(args, "id"):

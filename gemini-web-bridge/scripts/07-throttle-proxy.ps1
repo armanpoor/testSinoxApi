@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
 لایه تراتل ضدبن — یک پروکسی معکوس محلی با Jitter تصادفی بین درخواست‌ها.
 
@@ -79,45 +79,66 @@ while ($true) {
             continue
         }
 
-        Get-Delayed
-        $script:lastRequestAt = Get-Date
-
         $req = $ctx.Request
-        $ms = [System.IO.MemoryStream]::new()
-        $req.InputStream.CopyTo($ms)
-        $content = [System.Net.Http.ByteArrayContent]::new($ms.ToArray())
-        foreach ($h in $req.Headers.AllKeys) {
-            if ($h -in @("Host","Connection","Accept-Encoding","Content-Length")) { continue }
-            $content.Headers.TryAddWithoutValidation($h, $req.Headers[$h]) | Out-Null
+        $httpMethod = [System.Net.Http.HttpMethod]::new($req.HttpMethod)
+        $isChatReq = ($req.HttpMethod -eq "POST") -and ($req.Url.AbsolutePath -match "/(chat/completions|messages|responses)")
+
+        if ($isChatReq) {
+            Get-Delayed
+            $script:lastRequestAt = Get-Date
         }
 
-        # build request message so auth headers ride on the REQUEST, not content
         $upstream = "http://localhost:$TargetPort$($req.Url.PathAndQuery)"
-        $msg = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Post, $upstream)
-        $msg.Content = $content
+        $msg = [System.Net.Http.HttpRequestMessage]::new($httpMethod, $upstream)
+
+        if ($req.HasEntityBody) {
+            $ms = [System.IO.MemoryStream]::new()
+            $req.InputStream.CopyTo($ms)
+            $content = [System.Net.Http.ByteArrayContent]::new($ms.ToArray())
+            if ($req.ContentType) {
+                $content.Headers.TryAddWithoutValidation("Content-Type", $req.ContentType) | Out-Null
+            }
+            $msg.Content = $content
+        }
+
         foreach ($h in $req.Headers.AllKeys) {
-            if ($h -in @("Host","Connection","Accept-Encoding","Content-Length")) { continue }
+            if ($h -in @("Host","Connection","Accept-Encoding","Content-Length","Content-Type")) { continue }
             $msg.Headers.TryAddWithoutValidation($h, $req.Headers[$h]) | Out-Null
         }
-        $resp = $client.SendAsync($msg).GetAwaiter().GetResult()
-        $bytes = $resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
 
-        # error feedback: 429/502 - cooldown ------ -- --------
+        # ResponseHeadersRead ensures SSE chunks stream immediately without full buffering
+        $resp = $client.SendAsync($msg, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+
         if ([int]$resp.StatusCode -in 429, 502) {
             $script:cooldownUntil = (Get-Date).AddSeconds(60)
             Write-Host "  ⚠ خطا $($resp.StatusCode) از بالادست — cooldown 60s فعال شد" -ForegroundColor Yellow
         }
 
         $ctx.Response.StatusCode = [int]$resp.StatusCode
-        $ct = $resp.Content.Headers.ContentType; $ctx.Response.ContentType = if ($ct) { $ct.ToString() } else { "application/json" }
-        foreach ($h in $resp.Content.Headers) {
-            if ($h.Key -notin @("Content-Length")) {
-                try { $ctx.Response.Headers[$h.Key] = ($h.Value -join ", ") } catch {}
+        $ct = $resp.Content.Headers.ContentType
+        $ctStr = if ($ct) { $ct.ToString() } else { "application/json" }
+        $ctx.Response.ContentType = $ctStr
+        if ($ctStr -match "text/event-stream") {
+            $ctx.Response.SendChunked = $true
+            $ctx.Response.Headers["Cache-Control"] = "no-cache"
+        }
+
+        $upStream = $resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $buffer = New-Object byte[] 4096
+        $sample = ""
+        while (($read = $upStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $ctx.Response.OutputStream.Write($buffer, 0, $read)
+            $ctx.Response.OutputStream.Flush()
+            if ([int]$resp.StatusCode -eq 200 -and $sample.Length -lt 2048) {
+                $sample += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $read)
             }
         }
-        $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+        if ([int]$resp.StatusCode -eq 200 -and $sample -match "having a hard time fulfilling|Sorry, something went wrong|no content frame") {
+            $script:cooldownUntil = (Get-Date).AddSeconds(60)
+            Write-Host "  ⚠ تشخیص Soft-Block در پاسخ 200 — cooldown 60s فعال شد" -ForegroundColor Yellow
+        }
         $ctx.Response.Close()
-        Write-Host "  ✔ $($req.Url.Path) → $($resp.StatusCode)" -ForegroundColor DarkGray
+        Write-Host "  ✔ $($req.HttpMethod) $($req.Url.AbsolutePath) → $([int]$resp.StatusCode)" -ForegroundColor DarkGray
     }
     catch {
         Write-Host "  ✘ خطا: $_" -ForegroundColor Red

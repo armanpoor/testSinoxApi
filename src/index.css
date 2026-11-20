@@ -1,0 +1,56 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: #F8FAFC;
+  --surface: #FFFFFF;
+  --surface-subtle: #F1F5F9;
+  --border: #E2E8F0;
+  --primary: #2563EB;
+  --primary-hover: #1D4ED8;
+  --text-main: #0F172A;
+  --text-muted: #475569;
+  --font-fa: "Vazirmatn", "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --font-latin: "Plus Jakarta Sans", "Vazirmatn", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+.dark {
+  --background: #0B1120;
+  --surface: #111827;
+  --surface-subtle: #162033;
+  --border: #1E293B;
+  --primary: #2563EB;
+  --primary-hover: #3B82F6;
+  --text-main: #F1F5F9;
+  --text-muted: #94A3B8;
+}
+
+html {
+  font-family: var(--font-fa);
+}
+
+.font-latin {
+  font-family: var(--font-latin);
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+h1, h2, h3 {
+  text-wrap: balance;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -36,15 +36,24 @@ api-keys:
         - name: "gemini-3.5-flash-lite"
           alias: "gemini-3.5-flash-lite"
 "@
-Set-Content -Path (Join-Path $cpaDir "cfg\config.yaml") -Value $config -Encoding UTF8
+$ver = "8.0.79"
+$cfgPath = Join-Path $cpaDir "cfg\config.yaml"
+Set-Content -Path $cfgPath -Value $config -Encoding UTF8
 
 $exe = Join-Path $cpaDir "cli-proxy-api.exe"
 if (-not (Test-Path $exe)) {
-    Write-Host "در حال دانلود CLIProxyAPI ..." -ForegroundColor Cyan
-    $zip = Join-Path $env:TEMP "cpa.zip"
-    Invoke-WebRequest -Uri "https://github.com/router-for-me/CLIProxyAPI/releases/latest/download/CLIProxyAPI_8.0.79_windows_amd64.zip" -OutFile $zip
+    Write-Host "در حال دانلود CLIProxyAPI نسخه v$ver ..." -ForegroundColor Cyan
+    $zip = Join-Path $env:TEMP "cpa-$ver.zip"
+    $url = "https://github.com/router-for-me/CLIProxyAPI/releases/download/v$ver/CLIProxyAPI_${ver}_windows_amd64.zip"
+    Invoke-WebRequest -Uri $url -OutFile $zip
     Expand-Archive -Path $zip -DestinationPath $cpaDir -Force
+    Remove-Item -Path $zip -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "پل Anthropic روی پورت $port" -ForegroundColor Green
-& $exe --config "cfg/config.yaml"
+Push-Location $cpaDir
+try {
+    & $exe --config $cfgPath
+} finally {
+    Pop-Location
+}

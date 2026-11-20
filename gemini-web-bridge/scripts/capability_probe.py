@@ -7,18 +7,17 @@ model that answers correctly must have actually reasoned (or computed).
 Run:  python -I capability_probe.py
 """
 
-import json, random, re, ssl, time, urllib.request, urllib.error
+import argparse, json, os, random, re, time, urllib.request, urllib.error
 from itertools import combinations
 
-GATEWAY = "http://localhost:20128/v1/messages"
-HEADERS = {"content-type": "application/json", "anthropic-version": "2023-06-01"}
+DEFAULT_GATEWAY = os.environ.get("PROBE_GATEWAY", "http://127.0.0.1:8094/v1/messages")
+DEFAULT_API_KEY = os.environ.get("BRIDGE_KEY", "local-client-key-1")
 
-MODELS = [
-    "claude-opus-5.5",                    # the label under test (combo)
-    "sinoxapi/t-claude-opus-5.5",         # direct upstream
-    "sinoxapi/t-claude-sonnet-5.5",       # known sibling, control
-    "sinoxapi/t-claude-haiku-5.5",        # known weak, control
-    "gemini/gemini-3.5-flash-lite",       # negative control (cheap model)
+DEFAULT_MODELS = [
+    "gemini-4-carbon",
+    "gemini-4-neon",
+    "gemini-4-hydrogen",
+    "gemini-3.5-flash-lite",
 ]
 
 SEED = random.randrange(10**9)
@@ -125,12 +124,19 @@ PROBES = [
 
 
 # ---------------------------------------------------------------- transport
-def call(model, prompt, max_tokens=900):
+def call(gateway, api_key, model, prompt, max_tokens=900):
+    headers = {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
+    if api_key:
+        headers["x-api-key"] = api_key
+        headers["authorization"] = f"Bearer {api_key}"
     body = json.dumps({
         "model": model, "max_tokens": max_tokens, "stream": False,
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
-    req = urllib.request.Request(GATEWAY, data=body, headers=HEADERS, method="POST")
+    req = urllib.request.Request(gateway, data=body, headers=headers, method="POST")
     t0 = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=300) as r:
@@ -145,7 +151,10 @@ def call(model, prompt, max_tokens=900):
             usage = {}
         else:
             j = json.loads(raw)
-            text = "".join(c.get("text", "") for c in j.get("content", []))
+            if "choices" in j:
+                text = j["choices"][0].get("message", {}).get("content", "")
+            else:
+                text = "".join(c.get("text", "") for c in j.get("content", []))
             usage = j.get("usage", {})
         return text, usage, dt, None
     except urllib.error.HTTPError as e:
@@ -166,16 +175,22 @@ def extract(text, expected_is_num):
 
 
 def main():
-    print(f"SEED={SEED}")
+    ap = argparse.ArgumentParser(description="Gemini Web Bridge Capability Probe")
+    ap.add_argument("--gateway", default=DEFAULT_GATEWAY)
+    ap.add_argument("--api-key", default=DEFAULT_API_KEY)
+    ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
+    args = ap.parse_args()
+
+    print(f"SEED={SEED}  GATEWAY={args.gateway}")
     probes = [(name, fn()) for name, fn in PROBES]
     print(f"Generated {len(probes)} probes with locally-computed answers.\n")
 
     scores = {}
-    for model in MODELS:
+    for model in args.models:
         right = 0
         print(f"=== {model} ===")
         for name, (q, ans) in probes:
-            text, usage, dt, err = call(model, q)
+            text, usage, dt, err = call(args.gateway, args.api_key, model, q)
             if err:
                 print(f"  {name:16s} ERROR {err}")
                 continue

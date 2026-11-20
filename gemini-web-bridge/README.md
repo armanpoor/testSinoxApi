@@ -422,22 +422,29 @@ $env:ANTHROPIC_MODEL = "gemini-4-hydrogen"
 ## ۱۴. ساختار فایل‌های این مخزن
 
 ```
-gemini-web-bridge/
-├── README.md                        ← همین فایل
-├── LICENSE                          ← مجوز MIT
-├── scripts/
-│   ├── 01-start-proxy.ps1          ← دانلود و اجرای موتور وب (پورت 8093)
-│   ├── 02-start-bridge.ps1         ← دانلود و اجرای پل Anthropic (پورت 8094)
-│   ├── 03-extract-cookies.py       ← گرفتن کوکی از کروم با CDP (بدون وابستگی)
-│   ├── 04-test-api.py              ← تست سه‌مرحله‌ای: OpenAI / Anthropic / Tool
-│   ├── 05-manage-accounts.py       ← مدیریت Cookie Pool چند-اکانته (add/list/check/…)
-│   ├── 06-add-multi-accounts.ps1   ← افزودن چند اکانت با یک مرورگر واحد
-│   └── 07-throttle-proxy.ps1       ← لایه تراتل با Jitter و cooldown (ضدبن)
-└── docs/
-    ├── architecture.md             ← معماری فنی با جزئیات بیشتر (انگلیسی)
-    ├── 9router-setup.md            ← راهنمای کامل اتصال به 9router
-    ├── anti-ban.md                  ← راهنمای کامل ضدبن + چک‌لیست امن
-└── RESEARCH.md                     ← نتایج تحقیق عمیق اکوسیستم (۲۵ ریپو + ایده‌ها)
+.
+├── server.ts                         ← کنترل‌سنتر یکپارچه Node.js/TypeScript + تراتل SSE (پورت 3000 و 8095)
+├── src/                              ← رابط کاربری فارسی کنترل‌سنتر (React + Tailwind v4)
+└── gemini-web-bridge/
+    ├── README.md                     ← همین فایل
+    ├── LICENSE                       ← مجوز MIT
+    ├── scripts/
+    │   ├── bridge_lib.py             ← ماژول مشترک CDP WebSocket، پارسر فایرفاکس و پروفایل ضدبن
+    │   ├── 01-start-proxy.ps1        ← دانلود و اجرای موتور وب (پورت 8093)
+    │   ├── 02-start-bridge.ps1       ← دانلود و اجرای پل Anthropic (پورت 8094)
+    │   ├── 03-extract-cookies.py     ← استخراج کوکی از Chrome CDP یا Firefox (JSON / cookies.sqlite)
+    │   ├── 04-test-api.py            ← تست جامع: OpenAI / SSE Stream / Anthropic / Tool / 1PSIDTS SLO
+    │   ├── 05-manage-accounts.py     ← مدیریت Cookie Pool چند-اکانته + دستور harden (ضدبن)
+    │   ├── 06-add-multi-accounts.ps1 ← افزودن چند اکانت با یک مرورگر واحد + پاکسازی ایمن فایل موقت
+    │   ├── 07-throttle-proxy.ps1     ← لایه تراتل PowerShell با استریم واقعی SSE و تشخیص Soft-Block
+    │   ├── 08-cookie-watchdog.py     ← نگهبان اتمیک کوکی (Verify-Before-Delete + فایرفاکس)
+    │   └── capability_probe.py       ← سنجش توانمندی واقعی مدل‌های Gemini 4 با بذر تصادفی
+    ├── docs/
+    │   ├── architecture.md           ← معماری فنی با جزئیات بیشتر (انگلیسی)
+    │   ├── 9router-setup.md          ← راهنمای کامل اتصال به 9router
+    │   └── anti-ban.md               ← راهنمای کامل ضدبن + چک‌لیست امن
+    └── RESEARCH.md                   ← نتایج تحقیق عمیق اکوسیستم (۲۵ ریپو + ایده‌ها)
+```
 
 ---
 
