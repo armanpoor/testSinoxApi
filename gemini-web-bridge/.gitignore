@@ -1,0 +1,10 @@
+bin/
+bin-cpa/
+*.db
+*.db-journal
+cookie*.txt
+cookie*.json
+auths/
+*.log
+__pycache__/
+.env

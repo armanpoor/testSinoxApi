@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "gemini-panel",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["-e", "const http=require('http'),fs=require('fs'),path=require('path');const P=8100,A='http://localhost:8093';http.createServer((q,s)=>{s.setHeader('Access-Control-Allow-Origin','*');s.setHeader('Access-Control-Allow-Methods','GET,POST,PUT,DELETE,OPTIONS');s.setHeader('Access-Control-Allow-Headers','Content-Type,Authorization');if(q.method==='OPTIONS'){s.writeHead(204);s.end();return}if(q.url==='/'||q.url==='/gemini-panel.html'){fs.readFile('E:/projects/testSinoxApi/gemini-panel.html',(e,d)=>{if(e){s.writeHead(500);s.end('err');return}s.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});s.end(d)});return}const u=A+q.url.replace(/^\\/api\\//,'/admin/api/');const r=http.request(u,{method:q.method,headers:{...q.headers,host:'localhost:8093'}},p=>{s.writeHead(p.statusCode,{'Content-Type':p.headers['content-type']||'application/json','Access-Control-Allow-Origin':'*'});p.pipe(s)});r.on('error',e=>{s.writeHead(502,{'Content-Type':'application/json'});s.end(JSON.stringify({error:e.message}))});q.pipe(r)}).listen(P,'127.0.0.1',()=>console.log('Panel on '+P))"],
+      "port": 8100
+    }
+  ]
+}

@@ -1,0 +1,85 @@
+# === Sensitive / credentials ===
+*cookie*.txt
+*cookie*.json
+*cookie*.yaml
+*cookie*.yml
+auths/
+*.db
+*.db-shm
+*.db-wal
+*.log
+**/chrome-clone-*/
+**/chrome-clone-*/**
+admin_cookies.txt
+*.key
+*.pem
+.env
+*.env
+secret*
+secret*
+
+# === Build artifacts & binaries ===
+*.exe
+*.dll
+*.so
+*.dylib
+*.zip
+*.tar.gz
+bin/
+bin-*/
+*.msi
+
+# === Go ===
+vendor/
+*.exe~
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# === Node ===
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# === OS ===
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# === Large data dirs ===
+**/component_crx_cache/
+**/extensions_crx_cache/
+**/optimization_guide_model_store/
+**/segmentation_platform/
+**/GPUPersistentCache/
+**/GrShaderCache/
+**/ShaderCache/
+**/Crashpad/
+**/Safe Browsing/
+
+# === Test / temp ===
+*.tmp
+*.temp
+tmp_*
+state*.txt
+page_state.txt
+otaq7b_resp.txt
+9r_test.json
+readme-*.md
+RESULTS.md
+deep-dive-findings.md
+cliproxy-config-example.yaml
