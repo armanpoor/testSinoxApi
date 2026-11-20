@@ -1,3 +1,5 @@
+import { pickActiveApiKey } from '../src/lib/smartSync';
+import { emitLog } from './logHub';
 import { store } from './store';
 
 export interface UpstreamResponse<T = unknown> {
@@ -21,12 +23,7 @@ class AdminClient {
     }
   }
 
-  async login(overrideUrl?: string, overrideToken?: string): Promise<UpstreamResponse> {
-    const settings = store.getSettings();
-    const base = (overrideUrl || settings.gw2apiUrl).replace(/\/+$/, '');
-    const token = overrideToken ?? settings.adminToken;
-    this.resetSessionIfChanged(base, token);
-
+  private async trySingleLogin(base: string, token: string): Promise<UpstreamResponse> {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5000);
@@ -38,7 +35,9 @@ class AdminClient {
       });
       clearTimeout(timer);
 
-      const setCookie = res.headers.getSetCookie?.() || (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')!] : []);
+      const setCookie =
+        res.headers.getSetCookie?.() ||
+        (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')!] : []);
       if (setCookie.length > 0) {
         this.sessionCookie = setCookie.map((c) => c.split(';')[0]).join('; ');
       }
@@ -59,6 +58,8 @@ class AdminClient {
         };
       }
 
+      this.lastUrl = base;
+      this.lastToken = token;
       return { ok: true, status: res.status, data };
     } catch (err) {
       return {
@@ -68,6 +69,91 @@ class AdminClient {
         error: `اتصال به موتور وب (${base}) برقرار نشد: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
+  }
+
+  /**
+   * Smart login: tries configured token first, and on 401/403 automatically probes
+   * discovered local script tokens & standard defaults, persisting the working token automatically.
+   */
+  async login(overrideUrl?: string, overrideToken?: string): Promise<UpstreamResponse> {
+    const settings = store.getSettings();
+    const base = (overrideUrl || settings.gw2apiUrl).replace(/\/+$/, '');
+    const primaryToken = overrideToken ?? settings.adminToken;
+    this.resetSessionIfChanged(base, primaryToken);
+
+    const first = await this.trySingleLogin(base, primaryToken);
+    if (first.ok || first.offline || overrideToken !== undefined) {
+      return first;
+    }
+
+    // Re-scan local files in case the user restarted 01-start-proxy.ps1 with a new token
+    store.discoverLocalFiles();
+    const refreshed = store.getSettings().adminToken;
+    const candidates = Array.from(
+      new Set([refreshed, 'change-me-123', 'testprobe123', ''].filter((t) => t !== primaryToken))
+    );
+
+    for (const candidate of candidates) {
+      const attempt = await this.trySingleLogin(base, candidate);
+      if (attempt.ok) {
+        store.updateSettings({ adminToken: candidate });
+        emitLog('info', 'sync', `Admin token auto-discovered and authenticated against ${base}`);
+        return attempt;
+      }
+      if (attempt.offline) return attempt;
+    }
+
+    if (!first.offline) {
+      emitLog('error', 'engine', `Admin login rejected by ${base}`, first.error);
+    }
+    return first;
+  }
+
+  /**
+   * Automatically discovers an active API key from :8093 /admin/api/keys,
+   * or creates one automatically if none exist, and keeps CLIProxyAPI config.yaml in sync.
+   */
+  async autoSyncApiKey(): Promise<{ synced: boolean; created: boolean; key?: string; error?: string }> {
+    const res = await this.request('GET', '/admin/api/keys');
+    if (!res.ok) {
+      return { synced: false, created: false, error: res.error };
+    }
+
+    let activeKey = pickActiveApiKey(res.data);
+    let created = false;
+
+    if (!activeKey) {
+      const createRes = await this.request<{ key?: string; api_key?: string; item?: { key?: string } }>(
+        'POST',
+        '/admin/api/keys',
+        { label: 'auto-bridge-harness', name: 'auto-bridge-harness' }
+      );
+      if (createRes.ok && createRes.data) {
+        activeKey =
+          createRes.data.key ||
+          createRes.data.api_key ||
+          createRes.data.item?.key ||
+          pickActiveApiKey(createRes.data);
+        created = Boolean(activeKey);
+      }
+    }
+
+    if (activeKey) {
+      const current = store.getSettings().gw2apiKey;
+      if (current !== activeKey) {
+        store.updateSettings({ gw2apiKey: activeKey });
+      }
+      const yamlSynced = store.syncBridgeYamlKey(activeKey);
+      emitLog(
+        'info',
+        'sync',
+        created ? 'Auto-provisioned new engine API key on :8093' : 'Synced active engine API key from :8093',
+        yamlSynced ? 'config.yaml updated' : undefined
+      );
+      return { synced: true, created, key: activeKey };
+    }
+
+    return { synced: false, created: false, error: 'کلید API فعالی در موتور یافت نشد' };
   }
 
   async request<T = unknown>(

@@ -6,9 +6,11 @@ import {
   TerminalSquare,
   Sliders,
   Code2,
+  ScrollText,
   Sun,
   Moon,
   RefreshCw,
+  Wrench,
 } from 'lucide-react';
 import type { BridgeSettings, WatchdogRunRecord, WatchdogSource } from './lib/types';
 import { OverviewView, type ControlStatusPayload } from './components/OverviewView';
@@ -17,8 +19,11 @@ import { ThrottleAntiBanView } from './components/ThrottleAntiBanView';
 import { PlaygroundProbeView } from './components/PlaygroundProbeView';
 import { ModelsSettingsView } from './components/ModelsSettingsView';
 import { ConfigGeneratorView } from './components/ConfigGeneratorView';
+import { LogsView } from './components/LogsView';
+import { Modal } from './components/Modal';
+import { SmartTroubleshooter } from './components/SmartTroubleshooter';
 
-type TabKey = 'overview' | 'cookies' | 'throttle' | 'playground' | 'settings' | 'configs';
+type TabKey = 'overview' | 'cookies' | 'throttle' | 'playground' | 'settings' | 'configs' | 'logs';
 
 const NAV_ITEMS: Array<{ key: TabKey; label: string; icon: typeof LayoutDashboard }> = [
   { key: 'overview', label: 'نمای کلی و سرویس‌ها', icon: LayoutDashboard },
@@ -27,6 +32,7 @@ const NAV_ITEMS: Array<{ key: TabKey; label: string; icon: typeof LayoutDashboar
   { key: 'playground', label: 'آزمایشگاه چت و پروب', icon: TerminalSquare },
   { key: 'settings', label: 'مدل‌ها و تنظیمات', icon: Sliders },
   { key: 'configs', label: 'تولید کانفیگ ابزارها', icon: Code2 },
+  { key: 'logs', label: 'گزارش‌های زنده', icon: ScrollText },
 ];
 
 interface FullStatusResponse extends ControlStatusPayload {
@@ -46,13 +52,18 @@ export default function App() {
   const [fullSettings, setFullSettings] = useState<BridgeSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<{ msg: string; tone: 'ok' | 'err' } | null>(null);
+  const [troubleshooterOpen, setTroubleshooterOpen] = useState(false);
+  const [lastErrorContext, setLastErrorContext] = useState<{ error: string; source: string } | null>(null);
 
   const notify = useCallback((msg: string, tone: 'ok' | 'err' = 'ok') => {
     setToast({ msg, tone });
+    if (tone === 'err') {
+      setLastErrorContext({ error: msg, source: activeTab });
+    }
     setTimeout(() => {
       setToast((curr) => (curr?.msg === msg ? null : curr));
-    }, 3400);
-  }, []);
+    }, tone === 'err' ? 6500 : 3400);
+  }, [activeTab]);
 
   const refreshAll = useCallback(async () => {
     setLoading(true);
@@ -146,6 +157,18 @@ export default function App() {
           <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
+              onClick={() => setTroubleshooterOpen(true)}
+              className={`inline-flex h-10 items-center gap-2 rounded-lg border px-3.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                !statusData?.upstream.online || lastErrorContext
+                  ? 'border-amber-300 bg-amber-50/70 text-amber-800 hover:bg-amber-100/70 dark:border-amber-800/80 dark:bg-amber-950/30 dark:text-amber-300 dark:hover:bg-amber-950/50'
+                  : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800'
+              }`}
+            >
+              <Wrench className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">عیب‌یاب و تعمیر خودکار</span>
+            </button>
+            <button
+              type="button"
               onClick={() => setDark((d) => !d)}
               aria-label={dark ? 'تغییر به تم روشن' : 'تغییر به تم تیره'}
               className="flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
@@ -179,6 +202,7 @@ export default function App() {
             <CookiesWatchdogView
               online={Boolean(statusData?.upstream.online)}
               cookies={statusData?.upstream.cookies?.items || []}
+              localEnv={statusData?.localEnv}
               watchdog={statusData?.watchdog || null}
               cdpPort={fullSettings?.cdpPort ?? 9333}
               onRefresh={refreshAll}
@@ -199,6 +223,7 @@ export default function App() {
             <PlaygroundProbeView
               availableModels={statusData?.upstream.models || []}
               online={Boolean(statusData?.upstream.online)}
+              onRefresh={refreshAll}
               onNotify={notify}
             />
           )}
@@ -209,6 +234,7 @@ export default function App() {
               upstreamModels={statusData?.upstream.models || []}
               upstreamConfig={statusData?.upstream.config || null}
               online={Boolean(statusData?.upstream.online)}
+              autoSync={statusData?.autoSync}
               onRefresh={refreshAll}
               onNotify={notify}
             />
@@ -217,21 +243,54 @@ export default function App() {
           {activeTab === 'configs' && (
             <ConfigGeneratorView settings={fullSettings} onNotify={notify} />
           )}
+
+          {activeTab === 'logs' && <LogsView onNotify={notify} />}
         </main>
       </div>
+
+      {/* Global Smart Troubleshooter & Auto-Heal Modal */}
+      <Modal
+        open={troubleshooterOpen}
+        onClose={() => setTroubleshooterOpen(false)}
+        title="عیب‌یابی ریشه‌ای و تعمیر خودکار پل جمنای"
+        subtitle="اسکن لایه‌های موتور، پل، تراتل و کوکی‌ها + اجرای خودکار مراحل تعمیر توسط سرور یا Claude Code"
+        maxWidthClass="max-w-3xl"
+      >
+        <SmartTroubleshooter
+          contextError={lastErrorContext?.error}
+          contextSource={lastErrorContext?.source || activeTab}
+          onHealed={async () => {
+            await refreshAll();
+          }}
+          onNotify={notify}
+        />
+      </Modal>
 
       {/* Live Toast */}
       {toast && (
         <div
           role="status"
           aria-live="polite"
-          className={`fixed bottom-5 left-5 z-50 rounded-lg border px-4 py-3 text-xs font-medium shadow-lg ${
+          className={`fixed bottom-5 left-5 z-50 flex max-w-md items-center gap-3 rounded-lg border px-4 py-3 text-xs font-medium shadow-lg ${
             toast.tone === 'ok'
               ? 'border-emerald-300 bg-white text-emerald-800 dark:border-emerald-800 dark:bg-[#111827] dark:text-emerald-300'
               : 'border-red-300 bg-white text-red-800 dark:border-red-800 dark:bg-[#111827] dark:text-red-300'
           }`}
         >
-          {toast.msg}
+          <span className="leading-relaxed">{toast.msg}</span>
+          {toast.tone === 'err' && (
+            <button
+              type="button"
+              onClick={() => {
+                setToast(null);
+                setTroubleshooterOpen(true);
+              }}
+              className="inline-flex shrink-0 items-center gap-1 rounded-md border border-red-300 bg-red-50 px-2.5 py-1 text-[11px] font-medium text-red-700 hover:bg-red-100 whitespace-nowrap dark:border-red-800 dark:bg-red-950/60 dark:text-red-200 dark:hover:bg-red-900/60"
+            >
+              <Wrench className="h-3 w-3" />
+              ریشه‌یابی و تعمیر
+            </button>
+          )}
         </div>
       )}
     </div>

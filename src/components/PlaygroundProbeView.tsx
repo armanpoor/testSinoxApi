@@ -11,11 +11,14 @@ import {
   CheckCircle2,
   XCircle,
 } from 'lucide-react';
+import { parseSafeJsonResponse } from '../lib/diagnostics';
 import type { ProbeCase, ProbeResult } from '../lib/types';
+import { SmartTroubleshooter } from './SmartTroubleshooter';
 
 interface PlaygroundProbeViewProps {
   availableModels: string[];
   online: boolean;
+  onRefresh: () => Promise<void>;
   onNotify: (msg: string, tone?: 'ok' | 'err') => void;
 }
 
@@ -37,13 +40,14 @@ const DEFAULT_MODELS = [
   'gemini-3.5-flash-lite',
 ];
 
-export function PlaygroundProbeView({ availableModels, online, onNotify }: PlaygroundProbeViewProps) {
+export function PlaygroundProbeView({ availableModels, online, onRefresh, onNotify }: PlaygroundProbeViewProps) {
   const [subTab, setSubTab] = useState<'playground' | 'probe'>('playground');
   const models = availableModels.length > 0 ? availableModels : DEFAULT_MODELS;
 
   // Playground state
   const [selectedModel, setSelectedModel] = useState(models[0] || 'gemini-4-hydrogen');
   const [prompt, setPrompt] = useState('');
+  const [lastSentPrompt, setLastSentPrompt] = useState('');
   const [useThrottle, setUseThrottle] = useState(true);
   const [enableToolTest, setEnableToolTest] = useState(false);
   const [streaming, setStreaming] = useState(false);
@@ -57,6 +61,7 @@ export function PlaygroundProbeView({ availableModels, online, onNotify }: Playg
   const [probeModels, setProbeModels] = useState<string[]>(['gemini-4-hydrogen', 'gemini-3.5-flash-lite']);
   const [probeRunning, setProbeRunning] = useState(false);
   const [probeResults, setProbeResults] = useState<ProbeResult[]>([]);
+  const [probeError, setProbeError] = useState<string | null>(null);
 
   const loadProbePreview = async (seed?: number) => {
     try {
@@ -74,15 +79,19 @@ export function PlaygroundProbeView({ availableModels, online, onNotify }: Playg
     void loadProbePreview();
   }, []);
 
-  const handleSendChat = async () => {
-    const text = prompt.trim();
+  const handleSendChat = async (overrideText?: string) => {
+    const text = (overrideText ?? prompt).trim();
     if (!text || streaming) return;
 
     const userTurn: ChatTurn = { id: `u-${Date.now()}`, role: 'user', content: text };
     const assistantId = `a-${Date.now() + 1}`;
-    const nextHistory = [...turns, userTurn];
+    const cleanHistory = overrideText
+      ? turns.filter((t) => !t.error)
+      : turns;
+    const nextHistory = [...cleanHistory, userTurn];
+    setLastSentPrompt(text);
     setTurns([...nextHistory, { id: assistantId, role: 'assistant', content: '' }]);
-    setPrompt('');
+    if (!overrideText) setPrompt('');
     setStreaming(true);
 
     const ctrl = new AbortController();
@@ -103,18 +112,15 @@ export function PlaygroundProbeView({ availableModels, online, onNotify }: Playg
         signal: ctrl.signal,
       });
 
-      const ct = r.headers.get('content-type') || '';
+      const ct = (r.headers.get('content-type') || '').toLowerCase();
       if (!r.ok) {
-        const errText = await r.text();
-        let msg = `HTTP ${r.status}`;
-        try {
-          const parsed = JSON.parse(errText) as { error?: string | { message?: string } };
-          msg = typeof parsed.error === 'string' ? parsed.error : parsed.error?.message || msg;
-        } catch {
-          if (errText) msg = errText.slice(0, 180);
-        }
+        const parsedErr = await parseSafeJsonResponse(r);
         setTurns((prev) =>
-          prev.map((t) => (t.id === assistantId ? { ...t, error: msg, latencyMs: Math.round(performance.now() - t0) } : t))
+          prev.map((t) =>
+            t.id === assistantId
+              ? { ...t, error: parsedErr.error || `HTTP ${r.status}`, latencyMs: Math.round(performance.now() - t0) }
+              : t
+          )
         );
         return;
       }
@@ -167,12 +173,22 @@ export function PlaygroundProbeView({ availableModels, online, onNotify }: Playg
           }
         }
       } else {
-        const j = (await r.json()) as {
+        const parsed = await parseSafeJsonResponse<{
           choices?: Array<{
             message?: { content?: string; reasoning_content?: string; tool_calls?: unknown[] };
           }>;
-        };
-        const msg = j.choices?.[0]?.message;
+        }>(r);
+        if (!parsed.ok || !parsed.data) {
+          setTurns((prev) =>
+            prev.map((t) =>
+              t.id === assistantId
+                ? { ...t, error: parsed.error || 'پاسخ نامعتبر از سرور دریافت شد', latencyMs: Math.round(performance.now() - t0) }
+                : t
+            )
+          );
+          return;
+        }
+        const msg = parsed.data.choices?.[0]?.message;
         setTurns((prev) =>
           prev.map((t) =>
             t.id === assistantId
@@ -218,25 +234,37 @@ export function PlaygroundProbeView({ availableModels, online, onNotify }: Playg
     }
     setProbeRunning(true);
     setProbeResults([]);
+    setProbeError(null);
     try {
       const r = await fetch('/api/control/probes/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ seed: probeSeed, models: probeModels, limit: 3 }),
       });
-      const j = (await r.json()) as { ok?: boolean; results?: ProbeResult[]; error?: string };
-      if (!r.ok || !j.ok) {
-        onNotify(j.error || 'اجرای پروب ناموفق بود', 'err');
+      const parsed = await parseSafeJsonResponse<{ ok?: boolean; results?: ProbeResult[]; error?: string }>(r);
+      if (!parsed.ok || !parsed.data?.ok) {
+        const msg = parsed.error || parsed.data?.error || 'اجرای پروب ناموفق بود';
+        setProbeError(msg);
+        onNotify(msg, 'err');
       } else {
-        setProbeResults(j.results || []);
-        onNotify(`سنجش توانمندی پایان یافت (${j.results?.length ?? 0} آزمون)`, 'ok');
+        const list = parsed.data.results || [];
+        setProbeResults(list);
+        const firstErr = list.find((x) => x.error)?.error || null;
+        if (firstErr) {
+          setProbeError(firstErr);
+        }
+        onNotify(`سنجش توانمندی پایان یافت (${list.length} آزمون)`, firstErr ? 'err' : 'ok');
       }
     } catch (e) {
-      onNotify(e instanceof Error ? e.message : 'خطا', 'err');
+      const msg = e instanceof Error ? e.message : 'خطا در اجرای پروب';
+      setProbeError(msg);
+      onNotify(msg, 'err');
     } finally {
       setProbeRunning(false);
     }
   };
+
+  const lastErrorTurn = [...turns].reverse().find((t) => Boolean(t.error));
 
   return (
     <div className="space-y-6">
@@ -391,6 +419,19 @@ export function PlaygroundProbeView({ availableModels, online, onNotify }: Playg
               ))
             )}
           </div>
+
+          {lastErrorTurn?.error && (
+            <div className="border-t border-slate-200 px-6 py-4 dark:border-slate-800">
+              <SmartTroubleshooter
+                compact
+                contextError={lastErrorTurn.error}
+                contextSource={`playground-chat (${selectedModel})`}
+                onHealed={onRefresh}
+                onRetry={lastSentPrompt ? () => handleSendChat(lastSentPrompt) : undefined}
+                onNotify={onNotify}
+              />
+            </div>
+          )}
 
           {/* Input Bar */}
           <div className="border-t border-slate-200 p-4 dark:border-slate-800">
@@ -565,6 +606,17 @@ export function PlaygroundProbeView({ availableModels, online, onNotify }: Playg
                   </tbody>
                 </table>
               </div>
+            )}
+
+            {probeError && (
+              <SmartTroubleshooter
+                compact
+                contextError={probeError}
+                contextSource="capability-probe"
+                onHealed={onRefresh}
+                onRetry={handleRunProbes}
+                onNotify={onNotify}
+              />
             )}
           </div>
         </section>

@@ -9,6 +9,7 @@ import {
   type ThrottleConfig,
 } from '../src/lib/throttleEngine';
 import type { ThrottleLogEntry, ThrottleTelemetry } from '../src/lib/types';
+import { emitLog } from './logHub';
 import { store } from './store';
 
 const MAX_LOG_ENTRIES = 60;
@@ -27,6 +28,11 @@ export class AsyncStreamingThrottleProxy {
   private totalCooldownRejected = 0;
   private totalSoftBlocksDetected = 0;
   private recentLogs: ThrottleLogEntry[] = [];
+  private onSelfHealTrigger: ((reason: string) => void) | null = null;
+
+  setSelfHealCallback(cb: (reason: string) => void): void {
+    this.onSelfHealTrigger = cb;
+  }
 
   private getThrottleConfig(): ThrottleConfig {
     const s = store.getSettings();
@@ -66,12 +72,14 @@ export class AsyncStreamingThrottleProxy {
       srv.on('error', (err) => {
         this.running = false;
         this.server = null;
+        emitLog('error', 'throttle', `Failed to bind throttle proxy on 127.0.0.1:${s.throttlePort}`, err.message);
         resolve({ started: false, port: s.throttlePort, error: err.message });
       });
       srv.listen(s.throttlePort, '127.0.0.1', () => {
         this.server = srv;
         this.running = true;
         this.activePort = s.throttlePort;
+        emitLog('info', 'throttle', `Async SSE throttle proxy listening on http://127.0.0.1:${this.activePort}`, `target=${this.getTargetBaseUrl()}`);
         resolve({ started: true, port: this.activePort });
       });
     });
@@ -83,9 +91,11 @@ export class AsyncStreamingThrottleProxy {
       return;
     }
     const srv = this.server;
+    const prevPort = this.activePort;
     this.server = null;
     this.running = false;
     await new Promise<void>((resolve) => srv.close(() => resolve()));
+    emitLog('warn', 'throttle', `Throttle proxy stopped on port :${prevPort}`);
   }
 
   clearCooldowns(scope?: string): void {
@@ -244,6 +254,9 @@ export class AsyncStreamingThrottleProxy {
               const scope = status === 502 && model ? model : 'global';
               this.cooldowns.trigger(scope, cfg.cooldownSec, `Upstream HTTP ${status}`);
             }
+            if (status === 401 || status === 403 || status === 502) {
+              this.onSelfHealTrigger?.(`upstream-http-${status}`);
+            }
 
             // Copy response headers while keeping chunked/SSE streaming intact
             const outHeaders: Record<string, string | string[]> = {};
@@ -278,6 +291,7 @@ export class AsyncStreamingThrottleProxy {
                     cfg.cooldownSec,
                     'Soft-Block (HTTP 200 refusal text)'
                   );
+                  this.onSelfHealTrigger?.('soft-block-200');
                 }
               }
             });
@@ -298,6 +312,12 @@ export class AsyncStreamingThrottleProxy {
                 softBlocked,
                 note: softBlocked ? 'تشخیص Soft-Block (200)' : undefined,
               });
+              emitLog(
+                softBlocked || status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info',
+                'throttle',
+                `${method} ${forwardPath} -> HTTP ${status}`,
+                `model=${model || 'n/a'} jitter=${jitterMs}ms dur=${Date.now() - startedAt}ms${softBlocked ? ' SOFT-BLOCK' : ''}`
+              );
               resolve();
             });
 
@@ -345,6 +365,7 @@ export class AsyncStreamingThrottleProxy {
             softBlocked: false,
             note: 'بالادست خاموش است',
           });
+          emitLog('error', 'throttle', `Upstream unreachable for ${method} ${forwardPath}`, `${this.getTargetBaseUrl()} (${err.message})`);
           resolve();
         });
 

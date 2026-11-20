@@ -1,20 +1,31 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import {
+  parseAdminTokenFromScript,
+  parseBridgeYamlCredentials,
+} from '../src/lib/smartSync';
 import type { BridgeSettings, WatchdogSource } from '../src/lib/types';
 
 const ROOT_DIR = process.cwd();
 const STATE_FILE = path.join(ROOT_DIR, '.bridge-control-state.json');
 const WATCHDOG_SOURCES_FILE = path.join(ROOT_DIR, 'gemini-web-bridge', 'scripts', 'cookie-sources.json');
+const BRIDGE_YAML_FILE = path.join(ROOT_DIR, 'gemini-web-bridge', 'bin-cpa', 'cfg', 'config.yaml');
+const PROXY_PS1_FILE = path.join(ROOT_DIR, 'gemini-web-bridge', 'scripts', '01-start-proxy.ps1');
+
+function generateLocalSecret(prefix: string): string {
+  return `${prefix}-${crypto.randomBytes(12).toString('hex')}`;
+}
 
 export const DEFAULT_SETTINGS: BridgeSettings = {
-  gw2apiUrl: process.env.GW2API_URL || 'http://127.0.0.1:8093',
-  bridgeUrl: process.env.BRIDGE_URL || 'http://127.0.0.1:8094',
-  adminToken: process.env.GW2API_ADMIN_TOKEN || 'change-me-123',
-  gw2apiKey: process.env.GW2API_KEY || '',
-  bridgeKey: process.env.BRIDGE_KEY || 'local-client-key-1',
-  cdpPort: Number(process.env.CDP_PORT || 9333),
-  throttlePort: Number(process.env.THROTTLE_PORT || 8095),
-  throttleEnabled: process.env.THROTTLE_ENABLED !== 'false',
+  gw2apiUrl: 'http://127.0.0.1:8093',
+  bridgeUrl: 'http://127.0.0.1:8094',
+  adminToken: 'change-me-123',
+  gw2apiKey: '',
+  bridgeKey: 'local-client-key-1',
+  cdpPort: 9333,
+  throttlePort: 8095,
+  throttleEnabled: true,
   throttleTarget: 'bridge',
   minDelayMs: 2000,
   maxDelayMs: 7000,
@@ -26,7 +37,7 @@ export const DEFAULT_SETTINGS: BridgeSettings = {
   cooldownSec: 60,
   detectSoftBlock: true,
   watchdogIntervalMin: 10,
-  watchdogAutoRun: false,
+  watchdogAutoRun: true,
 };
 
 interface PersistedState {
@@ -39,18 +50,28 @@ class LocalStore {
 
   constructor() {
     this.load();
+    this.discoverLocalFiles();
   }
 
   private load(): void {
+    let loadedFromDisk = false;
     try {
       if (fs.existsSync(STATE_FILE)) {
         const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8')) as Partial<PersistedState>;
         if (raw.settings) {
           this.settings = { ...DEFAULT_SETTINGS, ...raw.settings };
+          loadedFromDisk = true;
         }
       }
     } catch {
       this.settings = { ...DEFAULT_SETTINGS };
+    }
+
+    // Ensure valid non-empty local bridge key automatically on first boot
+    if (!this.settings.bridgeKey || this.settings.bridgeKey === 'local-client-key-1') {
+      if (!loadedFromDisk) {
+        this.settings.bridgeKey = generateLocalSecret('gwb-local');
+      }
     }
 
     try {
@@ -70,6 +91,69 @@ class LocalStore {
     } catch {
       this.sources = [];
     }
+  }
+
+  /**
+   * Automatically discovers existing local tokens/keys from CLIProxyAPI config.yaml and scripts.
+   */
+  discoverLocalFiles(): { discoveredBridgeKey: boolean; discoveredEngineKey: boolean; discoveredAdminToken: boolean } {
+    let discoveredBridgeKey = false;
+    let discoveredEngineKey = false;
+    let discoveredAdminToken = false;
+
+    try {
+      if (fs.existsSync(BRIDGE_YAML_FILE)) {
+        const yaml = fs.readFileSync(BRIDGE_YAML_FILE, 'utf-8');
+        const parsed = parseBridgeYamlCredentials(yaml);
+        if (parsed.bridgeKey) {
+          this.settings.bridgeKey = parsed.bridgeKey;
+          discoveredBridgeKey = true;
+        }
+        if (parsed.engineKey && !this.settings.gw2apiKey) {
+          this.settings.gw2apiKey = parsed.engineKey;
+          discoveredEngineKey = true;
+        }
+      }
+    } catch {
+      // ignore unreadable yaml
+    }
+
+    try {
+      if (fs.existsSync(PROXY_PS1_FILE)) {
+        const ps1 = fs.readFileSync(PROXY_PS1_FILE, 'utf-8');
+        const tok = parseAdminTokenFromScript(ps1);
+        if (tok && (!this.settings.adminToken || this.settings.adminToken === 'change-me-123')) {
+          this.settings.adminToken = tok;
+          discoveredAdminToken = true;
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    if (discoveredBridgeKey || discoveredEngineKey || discoveredAdminToken) {
+      this.saveState();
+    }
+
+    return { discoveredBridgeKey, discoveredEngineKey, discoveredAdminToken };
+  }
+
+  /**
+   * Keeps local CLIProxyAPI config.yaml synchronized whenever the engine API key changes.
+   */
+  syncBridgeYamlKey(newEngineKey: string): boolean {
+    if (!newEngineKey || !fs.existsSync(BRIDGE_YAML_FILE)) return false;
+    try {
+      const yaml = fs.readFileSync(BRIDGE_YAML_FILE, 'utf-8');
+      const updated = yaml.replace(/(\bapi-key\s*:\s*["']?)([^"'\s#]+)(["']?)/i, `$1${newEngineKey}$3`);
+      if (updated !== yaml) {
+        fs.writeFileSync(BRIDGE_YAML_FILE, updated, 'utf-8');
+        return true;
+      }
+    } catch {
+      // ignore
+    }
+    return false;
   }
 
   private saveState(): void {

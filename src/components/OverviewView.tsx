@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   CheckCircle2,
   AlertTriangle,
@@ -8,12 +8,36 @@ import {
   ShieldCheck,
   RefreshCw,
   ArrowUpLeft,
+  Globe,
+  Chrome,
+  Copy,
+  Check,
+  Terminal,
 } from 'lucide-react';
-import type { AntiBanAuditItem, CookieAccount, LayerStatus, ThrottleTelemetry } from '../lib/types';
+import type {
+  AntiBanAuditItem,
+  AutoLoginState,
+  CookieAccount,
+  LayerStatus,
+  LocalEnvironmentInfo,
+  SystemResourcesSnapshot,
+  ThrottleTelemetry,
+} from '../lib/types';
+import { SystemResourcesCard } from './SystemResourcesCard';
+import { ThroughputMiniCard } from './ThroughputMiniCard';
 
 export interface ControlStatusPayload {
   layers: LayerStatus[];
+  localEnv?: LocalEnvironmentInfo;
+  autoLogin?: AutoLoginState;
+  autoSync?: {
+    running: boolean;
+    lastSyncAt: number;
+    lastSelfHealAt: number;
+    events: Array<{ ts: number; kind: string; ok: boolean; detail: string }>;
+  };
   throttle: ThrottleTelemetry;
+  systemResources?: SystemResourcesSnapshot;
   upstream: {
     online: boolean;
     stats: {
@@ -40,6 +64,114 @@ interface OverviewViewProps {
 
 export function OverviewView({ data, loading, onRefresh, onNotify, onNavigate }: OverviewViewProps) {
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [autoLogin, setAutoLogin] = useState<AutoLoginState | null>(null);
+  const [copiedCmd, setCopiedCmd] = useState(false);
+
+  const isLocalHost =
+    typeof window !== 'undefined' &&
+    ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+  const hasAnyLocalBrowser = Boolean(
+    data?.localEnv?.detectedChromePath || (data?.localEnv?.firefoxProfiles?.length ?? 0) > 0
+  );
+  const isCloudSandbox = !isLocalHost || !hasAnyLocalBrowser;
+
+  useEffect(() => {
+    if (data?.autoLogin && data.autoLogin.status !== 'idle') {
+      setAutoLogin(data.autoLogin);
+    }
+  }, [data?.autoLogin]);
+
+  useEffect(() => {
+    if (!autoLogin || !['launching', 'waiting_login', 'extracting', 'registering'].includes(autoLogin.status)) {
+      return;
+    }
+    const timer = setInterval(async () => {
+      try {
+        const r = await fetch('/api/control/cookies/auto-login/status');
+        if (!r.ok) return;
+        const st = (await r.json()) as AutoLoginState;
+        setAutoLogin(st);
+        if (st.status === 'done') {
+          onNotify(st.message, 'ok');
+          void onRefresh();
+        } else if (st.status === 'error') {
+          onNotify(st.message, 'err');
+        }
+      } catch {
+        // ignore transient poll error
+      }
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [autoLogin, onNotify, onRefresh]);
+
+  const handleAutoFirefox = async () => {
+    setBusyKey('auto-ff');
+    try {
+      const r = await fetch('/api/control/cookies/auto-firefox', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: 'firefox-pro', autoRegister: true }),
+      });
+      const j = (await r.json()) as {
+        ok?: boolean;
+        foundCount?: number;
+        registeredId?: number | null;
+        error?: string;
+      };
+      if (!r.ok || !j.ok) {
+        onNotify(j.error || 'استخراج خودکار از فایرفاکس ناموفق بود', 'err');
+      } else {
+        onNotify(
+          j.registeredId
+            ? `${j.foundCount} کوکی از فایرفاکس استخراج و خودکار در موتور ثبت شد`
+            : `${j.foundCount} کوکی از فایرفاکس استخراج شد (موتور 8093 آفلاین است)`,
+          'ok'
+        );
+        await onRefresh();
+      }
+    } catch (e) {
+      onNotify(e instanceof Error ? e.message : 'خطای ارتباط', 'err');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleStartAutoBrowser = async () => {
+    setBusyKey('auto-browser');
+    try {
+      const r = await fetch('/api/control/cookies/auto-login/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: 'gemini-pro-main', autoRegister: true }),
+      });
+      const j = (await r.json()) as { ok?: boolean; state?: AutoLoginState };
+      if (j.state) setAutoLogin(j.state);
+      if (!r.ok || !j.ok) {
+        onNotify(j.state?.message || 'باز کردن مرورگر محلی ممکن نیست', 'err');
+      }
+    } catch (e) {
+      onNotify(e instanceof Error ? e.message : 'خطای ارتباط', 'err');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleCancelAutoBrowser = async () => {
+    await fetch('/api/control/cookies/auto-login/cancel', { method: 'POST' });
+    setAutoLogin({ status: 'idle', message: '' });
+  };
+
+  const copyLocalCmd = async () => {
+    const cmd = 'powershell -ExecutionPolicy Bypass -File .\\gemini-web-bridge\\start-all.ps1';
+    try {
+      await navigator.clipboard.writeText(cmd);
+      setCopiedCmd(true);
+      onNotify('دستور اجرای محلی کپی شد', 'ok');
+      setTimeout(() => setCopiedCmd(false), 1800);
+    } catch {
+      onNotify('متن دستور را دستی کپی کنید', 'err');
+    }
+  };
 
   const handleProcessAction = async (target: 'engine' | 'bridge', action: 'start' | 'stop') => {
     setBusyKey(`${target}-${action}`);
@@ -167,6 +299,100 @@ export function OverviewView({ data, loading, onRefresh, onNotify, onNavigate }:
             </p>
           </div>
         </div>
+      </section>
+
+      {/* 60-Minute Request Throughput & Error Rate Mini-Dashboard */}
+      <ThroughputMiniCard
+        recentLogs={data?.throttle.recentLogs || []}
+        upstreamStats={data?.upstream.stats}
+        throttlePort={data?.throttle.port ?? 8095}
+      />
+
+      {/* Server System Resources Summary (CPU, RAM & Node Process Memory) */}
+      <SystemResourcesCard resources={data?.systemResources} />
+
+      {/* Zero-Copy Auto-Connect to Harness Banner */}
+      <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#111827]">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="max-w-2xl">
+            <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+              اتصال خودکار اشتراک جمنای پرو (وب) به هارنس — بدون کپی دستی کوکی
+            </h2>
+            <p className="mt-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+              {isCloudSandbox
+                ? 'این صفحه هم‌اکنون در پیش‌نمایش ابری باز شده است؛ مرورگر به دلایل امنیتی (Same-Origin / HttpOnly) به صفحات ابری اجازه خواندن کوکی‌های google.com سیستم شما را نمی‌دهد و برای جلوگیری از بن شدن اکانت هم ترافیک باید از IP خانگی خودتان ارسال شود. با اجرای دستور زیر روی سیستم شخصی، استخراج کوکی و اتصال به هارنس تماماً خودکار انجام می‌شود.'
+                : 'روی سیستم محلی هستید: با یک کلیک کوکی سشن جمنای پرو مستقیماً از فایرفاکس خوانده می‌شود یا پنجره مرورگر برای ورود باز شده، پس از لاگین خودکار استخراج و بسته می‌شود و هارنس روی پورت 8095 آماده کار خواهد شد.'}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              type="button"
+              disabled={busyKey === 'auto-ff' || (data?.localEnv?.firefoxProfiles?.length ?? 0) === 0}
+              onClick={() => void handleAutoFirefox()}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap"
+            >
+              <Globe className="h-3.5 w-3.5" />
+              {busyKey === 'auto-ff'
+                ? 'در حال اسکن...'
+                : `استخراج خودکار فایرفاکس (${data?.localEnv?.firefoxProfiles?.length ?? 0})`}
+            </button>
+            <button
+              type="button"
+              disabled={
+                busyKey === 'auto-browser' ||
+                !data?.localEnv?.detectedChromePath ||
+                ['launching', 'waiting_login', 'extracting', 'registering'].includes(autoLogin?.status || '')
+              }
+              onClick={() => void handleStartAutoBrowser()}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <Chrome className="h-3.5 w-3.5" />
+              لاگین و استخراج خودکار (کروم/اج)
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('configs')}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <Terminal className="h-3.5 w-3.5" />
+              کانفیگ هارنس‌ها
+            </button>
+          </div>
+        </div>
+
+        {/* Live Auto-Login Status Strip */}
+        {autoLogin && autoLogin.status !== 'idle' && (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50/70 px-4 py-3 text-xs dark:border-blue-900/60 dark:bg-blue-950/30">
+            <span className="text-slate-800 dark:text-slate-200">{autoLogin.message}</span>
+            {['launching', 'waiting_login', 'extracting', 'registering'].includes(autoLogin.status) && (
+              <button
+                type="button"
+                onClick={() => void handleCancelAutoBrowser()}
+                className="rounded-md border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-white dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              >
+                لغو
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* 1-Command Local Runner (shown clearly when in Cloud Preview or missing binaries) */}
+        {isCloudSandbox && (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 dark:border-slate-800 dark:bg-slate-900/70">
+            <code dir="ltr" className="overflow-x-auto font-mono text-xs text-slate-800 dark:text-slate-200">
+              powershell -ExecutionPolicy Bypass -File .\gemini-web-bridge\start-all.ps1
+            </code>
+            <button
+              type="button"
+              onClick={() => void copyLocalCmd()}
+              className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+            >
+              {copiedCmd ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+              {copiedCmd ? 'کپی شد' : 'کپی دستور اجرا'}
+            </button>
+          </div>
+        )}
       </section>
 
       {/* 4-Layer Architecture Orchestrator */}

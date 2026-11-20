@@ -6,8 +6,11 @@ import { parseCookieInput } from './src/lib/cookieParser';
 import { extractProbeAnswer, generateCapabilityProbes } from './src/lib/capabilityProbes';
 import type { ProbeResult } from './src/lib/types';
 import { adminClient } from './server/adminClient';
+import { buildLiveDiagnosis, runAutonomousAutoHeal } from './server/autoHealer';
+import { emitLog, serverLogs } from './server/logHub';
 import { orchestrator } from './server/orchestrator';
 import { store } from './server/store';
+import { systemMetrics } from './server/systemMetrics';
 import { throttleProxy } from './server/throttleProxy';
 
 const PORT = Number(process.env.PORT || 3000);
@@ -52,6 +55,9 @@ async function bootstrap() {
 
     res.json({
       layers,
+      localEnv: orchestrator.detectLocalEnvironment(),
+      autoLogin: orchestrator.getAutoLoginState(),
+      autoSync: orchestrator.getAutoSyncState(),
       settings: {
         ...settings,
         adminToken: settings.adminToken ? '••••••••' : '',
@@ -59,6 +65,7 @@ async function bootstrap() {
       },
       throttle,
       watchdog,
+      systemResources: systemMetrics.getSnapshot(),
       upstream: {
         online: Boolean(engineLayer?.online),
         stats: upstreamStats,
@@ -67,6 +74,73 @@ async function bootstrap() {
         config: upstreamConfig,
         antiBanAudit: evaluateAntiBanAudit(upstreamConfig),
       },
+    });
+  });
+
+  app.post('/api/control/smart-sync', async (_req, res) => {
+    emitLog('info', 'sync', 'Manual smart-sync & self-healing cycle requested');
+    const out = await orchestrator.runSmartAutoSync('manual');
+    res.json(out);
+  });
+
+  // ── Smart Root-Cause Diagnosis & Autonomous Auto-Heal ──
+  app.get('/api/control/diagnose', async (req, res) => {
+    const error = typeof req.query.error === 'string' ? req.query.error : undefined;
+    const source = typeof req.query.source === 'string' ? req.query.source : undefined;
+    const report = await buildLiveDiagnosis({ error, source });
+    res.json(report);
+  });
+
+  app.post('/api/control/auto-heal', async (req, res) => {
+    const error = typeof req.body?.error === 'string' ? req.body.error : undefined;
+    const source = typeof req.body?.source === 'string' ? req.body.source : undefined;
+    const report = await runAutonomousAutoHeal({ error, source });
+    res.json(report);
+  });
+
+  // ── Real-time Server Logs (Snapshot + SSE Stream + Diagnostics) ──
+  app.get('/api/control/logs', (_req, res) => {
+    res.json({ entries: serverLogs.list() });
+  });
+
+  app.post('/api/control/logs/clear', (_req, res) => {
+    serverLogs.clear();
+    emitLog('info', 'server', 'Log buffer cleared by user');
+    res.json({ ok: true });
+  });
+
+  app.post('/api/control/logs/probe', async (_req, res) => {
+    const out = await orchestrator.runConnectivityProbe();
+    res.json(out);
+  });
+
+  app.get('/api/control/logs/stream', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    // Replay current ring buffer immediately as initial snapshot
+    const snapshot = serverLogs.list();
+    res.write(`event: init\ndata: ${JSON.stringify(snapshot)}\n\n`);
+
+    const unsubscribe = serverLogs.subscribe((entry) => {
+      if (!res.writableEnded) {
+        res.write(`event: log\ndata: ${JSON.stringify(entry)}\n\n`);
+      }
+    });
+
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write(`: heartbeat ${Date.now()}\n\n`);
+      }
+    }, 20_000);
+
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+      if (!res.writableEnded) res.end();
     });
   });
 
@@ -153,6 +227,73 @@ async function bootstrap() {
     res.status(out.ok ? 200 : 400).json(out);
   });
 
+  app.post('/api/control/cookies/auto-firefox', async (req, res) => {
+    const profileDir = typeof req.body?.profileDir === 'string' && req.body.profileDir.trim()
+      ? req.body.profileDir.trim()
+      : undefined;
+    const label = typeof req.body?.label === 'string' && req.body.label.trim()
+      ? req.body.label.trim()
+      : 'firefox-pro';
+    const authuser = Number(req.body?.authuser || 0);
+    const autoRegister = req.body?.autoRegister !== false;
+
+    const extracted = await orchestrator.extractFromLocalFirefox(profileDir);
+    if (!extracted.ok || !extracted.cookieHeader) {
+      res.status(400).json(extracted);
+      return;
+    }
+
+    let registeredId: number | null = null;
+    let verified = false;
+    if (autoRegister) {
+      const reg = await adminClient.request<{ id?: number }>('POST', '/admin/api/cookies', {
+        label,
+        cookie: extracted.cookieHeader,
+        authuser,
+        note: 'auto-firefox-sqlite',
+      });
+      if (reg.ok && reg.data?.id) {
+        registeredId = reg.data.id;
+        const chk = await adminClient.request<{ ok?: boolean }>('POST', `/admin/api/cookies/${registeredId}/check`);
+        verified = Boolean(chk.ok && chk.data?.ok);
+        if (extracted.profileUsed) {
+          store.upsertWatchdogSource({
+            label,
+            browserType: 'firefox',
+            profileDir: extracted.profileUsed,
+            profileName: path.basename(extracted.profileUsed),
+            authuser,
+            note: 'auto-linked',
+          });
+        }
+      }
+    }
+
+    res.json({
+      ...extracted,
+      label,
+      registeredId,
+      verified,
+    });
+  });
+
+  app.post('/api/control/cookies/auto-login/start', async (req, res) => {
+    const out = await orchestrator.startAutoBrowserLogin({
+      label: typeof req.body?.label === 'string' ? req.body.label : undefined,
+      authuser: req.body?.authuser !== undefined ? Number(req.body.authuser) : 0,
+      autoRegister: req.body?.autoRegister !== false,
+    });
+    res.status(out.ok ? 200 : 400).json(out);
+  });
+
+  app.get('/api/control/cookies/auto-login/status', (_req, res) => {
+    res.json(orchestrator.getAutoLoginState());
+  });
+
+  app.post('/api/control/cookies/auto-login/cancel', (_req, res) => {
+    res.json(orchestrator.cancelAutoBrowserLogin());
+  });
+
   app.get('/api/control/watchdog', (_req, res) => {
     res.json(orchestrator.getWatchdogState());
   });
@@ -227,8 +368,19 @@ async function bootstrap() {
         body: JSON.stringify(payload),
       });
 
-      res.status(up.status);
       const ct = up.headers.get('content-type') || 'application/json';
+      if (ct.toLowerCase().includes('text/html')) {
+        const htmlSnippet = (await up.text()).trim().slice(0, 140);
+        emitLog('error', 'server', `Playground upstream ${targetBase} returned HTML instead of JSON/SSE`, htmlSnippet);
+        res.status(502).json({
+          code: 'HTML_INSTEAD_OF_JSON',
+          error: `سرویس مقصد (${targetBase}) به‌جای JSON صفحه HTML برگرداند — احتمالاً موتور وب یا پل در دسترس نیست.`,
+          target: targetBase,
+        });
+        return;
+      }
+
+      res.status(up.status);
       res.setHeader('Content-Type', ct);
       if (ct.includes('text/event-stream')) {
         res.setHeader('Cache-Control', 'no-cache');
@@ -249,7 +401,9 @@ async function bootstrap() {
       res.end();
     } catch (err) {
       res.status(503).json({
+        code: 'UPSTREAM_UNREACHABLE',
         error: `اتصال به ${targetBase} برقرار نشد: ${err instanceof Error ? err.message : String(err)}`,
+        target: targetBase,
       });
     }
   });
@@ -356,6 +510,14 @@ async function bootstrap() {
     res.status(upstream.status).json(upstream.ok ? upstream.data : { error: upstream.error, offline: upstream.offline });
   });
 
+  // Never let unmatched /api/* routes fall through to Vite SPA index.html
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({
+      code: 'API_ROUTE_NOT_FOUND',
+      error: `مسیر API یافت نشد: ${req.method} ${req.path}`,
+    });
+  });
+
   // Start embedded Async SSE Throttle Proxy on configured port
   const tStart = await throttleProxy.start();
   if (tStart.started) {
@@ -378,6 +540,7 @@ async function bootstrap() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
+    emitLog('info', 'server', `Gemini Web Bridge Control Center ready on http://0.0.0.0:${PORT}`, `env=${isProd ? 'production' : 'development'}`);
     console.log(`[Control Center] Ready at http://0.0.0.0:${PORT}`);
   });
 }

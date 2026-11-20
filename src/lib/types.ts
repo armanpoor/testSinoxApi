@@ -124,3 +124,50 @@ export interface ProbeResult {
   durationMs: number;
   error?: string;
 }
+
+export interface FirefoxProfileInfo {
+  name: string;
+  path: string;
+  hasCookiesDb: boolean;
+}
+
+export interface LocalEnvironmentInfo {
+  platform: string;
+  hasEngineBinary: boolean;
+  hasBridgeBinary: boolean;
+  detectedChromePath: string | null;
+  firefoxProfiles: FirefoxProfileInfo[];
+  pythonCommand: string | null;
+}
+
+export interface AutoLoginState {
+  status: 'idle' | 'launching' | 'waiting_login' | 'extracting' | 'registering' | 'done' | 'error';
+  message: string;
+  startedAt?: number;
+  label?: string;
+  foundCount?: number;
+  has1psidts?: boolean;
+  registeredId?: number;
+  cookieHeader?: string;
+}
+
+export interface SystemResourcesSnapshot {
+  sampledAt: number;
+  platform: string;
+  arch: string;
+  nodeVersion: string;
+  cpuModel: string;
+  cpuCores: number;
+  cpuUsagePercent: number;
+  loadAvg: [number, number, number];
+  totalMemBytes: number;
+  usedMemBytes: number;
+  freeMemBytes: number;
+  memUsagePercent: number;
+  processRssBytes: number;
+  processHeapUsedBytes: number;
+  processHeapTotalBytes: number;
+  heapUsagePercent: number;
+  systemUptimeSec: number;
+  processUptimeSec: number;
+}

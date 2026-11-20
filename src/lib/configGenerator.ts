@@ -154,6 +154,37 @@ export function generateToolSnippets(opts: SnippetOptions) {
     2
   );
 
+  const opencodeConfig = JSON.stringify(
+    {
+      $schema: 'https://opencode.ai/config.json',
+      provider: {
+        'gemini-web-bridge': {
+          npm: '@ai-sdk/openai-compatible',
+          name: 'Gemini Web Pro Bridge',
+          options: {
+            baseURL: openaiBase,
+            apiKey: opts.useThrottle ? bridgeKey : engineKey,
+          },
+          models: {
+            [model]: { name: model },
+            'gemini-4-hydrogen-thinking': { name: 'gemini-4-hydrogen-thinking' },
+            'gemini-4-neon': { name: 'gemini-4-neon' },
+          },
+        },
+      },
+      model: `gemini-web-bridge/${model}`,
+    },
+    null,
+    2
+  );
+
+  const aiderCommand = [
+    `# PowerShell / Bash (Aider / هر هارنس OpenAI-Compatible)`,
+    `export OPENAI_API_BASE="${openaiBase}"`,
+    `export OPENAI_API_KEY="${opts.useThrottle ? bridgeKey : engineKey}"`,
+    `aider --model openai/${model}`,
+  ].join('\n');
+
   const nineRouterGuide = {
     name: 'gw2gemini',
     prefix: 'gw2',
@@ -175,6 +206,8 @@ export function generateToolSnippets(opts: SnippetOptions) {
     claudeBash,
     claudeSettingsJson,
     clineConfig,
+    opencodeConfig,
+    aiderCommand,
     nineRouterGuide,
   };
 }

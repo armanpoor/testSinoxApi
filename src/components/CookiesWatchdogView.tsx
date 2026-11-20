@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Plus,
   RefreshCw,
@@ -11,14 +11,22 @@ import {
   Globe,
   KeyRound,
   Play,
+  Sparkles,
 } from 'lucide-react';
 import { parseCookieInput } from '../lib/cookieParser';
-import type { CookieAccount, WatchdogRunRecord, WatchdogSource } from '../lib/types';
+import type {
+  AutoLoginState,
+  CookieAccount,
+  LocalEnvironmentInfo,
+  WatchdogRunRecord,
+  WatchdogSource,
+} from '../lib/types';
 import { Modal } from './Modal';
 
 interface CookiesWatchdogViewProps {
   online: boolean;
   cookies: CookieAccount[];
+  localEnv?: LocalEnvironmentInfo;
   watchdog: {
     autoRun: boolean;
     intervalMin: number;
@@ -43,6 +51,7 @@ function fmtRelative(sec?: number): string {
 export function CookiesWatchdogView({
   online,
   cookies,
+  localEnv,
   watchdog,
   cdpPort,
   onRefresh,
@@ -53,13 +62,43 @@ export function CookiesWatchdogView({
 
   // Add Cookie Modal State
   const [addOpen, setAddOpen] = useState(false);
-  const [importMode, setImportMode] = useState<'firefox' | 'cdp' | 'raw'>('firefox');
+  const [importMode, setImportMode] = useState<'auto' | 'firefox' | 'raw'>('auto');
   const [rawCookieInput, setRawCookieInput] = useState('');
   const [label, setLabel] = useState('');
   const [authuser, setAuthuser] = useState(0);
   const [note, setNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [cdpBusy, setCdpBusy] = useState(false);
+  const [autoBusy, setAutoBusy] = useState(false);
+  const [autoLogin, setAutoLogin] = useState<AutoLoginState | null>(null);
+
+  useEffect(() => {
+    if (!autoLogin || !['launching', 'waiting_login', 'extracting', 'registering'].includes(autoLogin.status)) {
+      return;
+    }
+    const timer = setInterval(async () => {
+      try {
+        const r = await fetch('/api/control/cookies/auto-login/status');
+        if (!r.ok) return;
+        const st = (await r.json()) as AutoLoginState;
+        setAutoLogin(st);
+        if (st.status === 'done') {
+          if (st.cookieHeader) setRawCookieInput(st.cookieHeader);
+          if (st.registeredId) {
+            onNotify(st.message, 'ok');
+            setAddOpen(false);
+            void onRefresh();
+          } else {
+            onNotify(st.message, 'ok');
+          }
+        } else if (st.status === 'error') {
+          onNotify(st.message, 'err');
+        }
+      } catch {
+        // ignore transient error
+      }
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [autoLogin, onNotify, onRefresh]);
 
   // Delete Confirmation Modal
   const [deleteTarget, setDeleteTarget] = useState<CookieAccount | null>(null);
@@ -91,8 +130,71 @@ export function CookiesWatchdogView({
     });
   }, [cookies, statusFilter, search]);
 
+  const handleAutoFirefoxExtract = async () => {
+    setAutoBusy(true);
+    try {
+      const r = await fetch('/api/control/cookies/auto-firefox', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          label: label.trim() || 'firefox-pro',
+          authuser,
+          autoRegister: online,
+        }),
+      });
+      const j = (await r.json()) as {
+        ok?: boolean;
+        cookieHeader?: string;
+        foundCount?: number;
+        registeredId?: number | null;
+        error?: string;
+      };
+      if (!r.ok || !j.ok || !j.cookieHeader) {
+        onNotify(j.error || 'استخراج خودکار از فایرفاکس ناموفق بود', 'err');
+      } else {
+        setRawCookieInput(j.cookieHeader);
+        if (!label.trim()) setLabel('firefox-pro');
+        if (j.registeredId) {
+          onNotify(`${j.foundCount} کوکی از فایرفاکس خوانده و خودکار در موتور ثبت شد`, 'ok');
+          setAddOpen(false);
+          await onRefresh();
+        } else {
+          onNotify(`${j.foundCount} کوکی از فایرفاکس استخراج شد`, 'ok');
+        }
+      }
+    } catch (e) {
+      onNotify(e instanceof Error ? e.message : 'خطای ارتباط', 'err');
+    } finally {
+      setAutoBusy(false);
+    }
+  };
+
+  const handleAutoBrowserLogin = async () => {
+    setAutoBusy(true);
+    try {
+      const r = await fetch('/api/control/cookies/auto-login/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          label: label.trim() || 'gemini-pro-web',
+          authuser,
+          autoRegister: online,
+        }),
+      });
+      const j = (await r.json()) as { ok?: boolean; state?: AutoLoginState };
+      if (j.state) setAutoLogin(j.state);
+      if (!r.ok || !j.ok) {
+        onNotify(j.state?.message || 'باز کردن مرورگر محلی ممکن نیست', 'err');
+      }
+    } catch (e) {
+      onNotify(e instanceof Error ? e.message : 'خطای ارتباط', 'err');
+    } finally {
+      setAutoBusy(false);
+    }
+  };
+
   const handleExtractCDP = async () => {
-    setCdpBusy(true);
+    setAutoBusy(true);
     try {
       const r = await fetch('/api/control/cookies/extract-cdp', {
         method: 'POST',
@@ -109,7 +211,7 @@ export function CookiesWatchdogView({
     } catch (e) {
       onNotify(e instanceof Error ? e.message : 'خطای ارتباط', 'err');
     } finally {
-      setCdpBusy(false);
+      setAutoBusy(false);
     }
   };
 
@@ -571,6 +673,20 @@ export function CookiesWatchdogView({
             <button
               type="button"
               role="tab"
+              aria-selected={importMode === 'auto'}
+              onClick={() => setImportMode('auto')}
+              className={`flex items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium transition-colors ${
+                importMode === 'auto'
+                  ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-slate-100'
+                  : 'text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              اتصال خودکار (بدون کپی)
+            </button>
+            <button
+              type="button"
+              role="tab"
               aria-selected={importMode === 'firefox'}
               onClick={() => setImportMode('firefox')}
               className={`flex items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium transition-colors ${
@@ -581,20 +697,6 @@ export function CookiesWatchdogView({
             >
               <Globe className="h-3.5 w-3.5" />
               فایرفاکس (JSON / Netscape)
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={importMode === 'cdp'}
-              onClick={() => setImportMode('cdp')}
-              className={`flex items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium transition-colors ${
-                importMode === 'cdp'
-                  ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-slate-100'
-                  : 'text-slate-600 dark:text-slate-400'
-              }`}
-            >
-              <Chrome className="h-3.5 w-3.5" />
-              استخراج کروم (CDP)
             </button>
             <button
               type="button"
@@ -612,19 +714,44 @@ export function CookiesWatchdogView({
             </button>
           </div>
 
-          {importMode === 'cdp' && (
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/60">
-              <div className="text-xs text-slate-600 dark:text-slate-300">
-                کروم موقت را با <span className="font-mono">--remote-debugging-port={cdpPort}</span> باز و لاگین کنید؛ پس از استخراج فوراً مرورگر را ببندید.
+          {importMode === 'auto' && (
+            <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/60">
+              <p className="text-xs leading-relaxed text-slate-600 dark:text-slate-300">
+                وقتی برنامه روی سیستم شخصی شما (<span dir="ltr" className="font-mono">localhost:3000</span>) اجرا شود، نیازی به کپی کردن دستی کوکی نیست؛ یکی از دو روش زیر را بزنید تا کوکی جمنای پرو خودکار خوانده و ثبت شود:
+              </p>
+              <div className="flex flex-wrap items-center gap-2.5">
+                <button
+                  type="button"
+                  disabled={autoBusy}
+                  onClick={() => void handleAutoFirefoxExtract()}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
+                >
+                  <Globe className="h-3.5 w-3.5" />
+                  خواندن خودکار از فایرفاکس ({localEnv?.firefoxProfiles?.length ?? 0} پروفایل)
+                </button>
+                <button
+                  type="button"
+                  disabled={autoBusy}
+                  onClick={() => void handleAutoBrowserLogin()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                >
+                  <Chrome className="h-3.5 w-3.5" />
+                  باز کردن پنجره لاگین خودکار جمنای
+                </button>
+                <button
+                  type="button"
+                  disabled={autoBusy}
+                  onClick={() => void handleExtractCDP()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                >
+                  خواندن از CDP باز ({cdpPort})
+                </button>
               </div>
-              <button
-                type="button"
-                disabled={cdpBusy}
-                onClick={() => void handleExtractCDP()}
-                className="rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
-              >
-                {cdpBusy ? 'در حال خواندن...' : `استخراج از پورت ${cdpPort}`}
-              </button>
+              {autoLogin && autoLogin.status !== 'idle' && (
+                <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-200">
+                  {autoLogin.message}
+                </div>
+              )}
             </div>
           )}
 

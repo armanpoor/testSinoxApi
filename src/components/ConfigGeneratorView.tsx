@@ -9,7 +9,7 @@ interface ConfigGeneratorViewProps {
 }
 
 export function ConfigGeneratorView({ settings, onNotify }: ConfigGeneratorViewProps) {
-  const [tool, setTool] = useState<'claude' | 'cline' | '9router'>('claude');
+  const [tool, setTool] = useState<'claude' | 'cline' | 'opencode' | '9router'>('claude');
   const [useThrottle, setUseThrottle] = useState(true);
   const [model, setModel] = useState('gemini-4-hydrogen');
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -45,10 +45,10 @@ export function ConfigGeneratorView({ settings, onNotify }: ConfigGeneratorViewP
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-5 dark:border-slate-800">
           <div>
             <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
-              تولیدکننده خودکار کانفیگ ابزارهای کدنویسی
+              تولیدکننده خودکار کانفیگ هارنس‌ها و ابزارهای کدنویسی
             </h2>
             <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-              اسنیپت‌های آماده بر اساس پورت‌ها و کلیدهای فعلی کنترل‌سنتر — آماده کپی در ترمینال یا فایل تنظیمات
+              اسنیپت‌های آماده اتصال اشتراک جمنای پرو به Claude Code، Cline/Roo، OpenCode، Aider و 9router
             </p>
           </div>
 
@@ -82,12 +82,13 @@ export function ConfigGeneratorView({ settings, onNotify }: ConfigGeneratorViewP
         </div>
 
         {/* Tool Selector Tabs */}
-        <div className="mt-5 inline-flex items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-900" role="tablist">
+        <div className="mt-5 inline-flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-900" role="tablist">
           {(
             [
               ['claude', 'Claude Code'],
-              ['cline', 'Cline (VS Code)'],
-              ['9router', '9router (Fallback Combo)'],
+              ['cline', 'Cline / Roo Code'],
+              ['opencode', 'OpenCode / Aider'],
+              ['9router', '9router (Fallback)'],
             ] as const
           ).map(([id, label]) => (
             <button
@@ -138,11 +139,32 @@ export function ConfigGeneratorView({ settings, onNotify }: ConfigGeneratorViewP
 
           {tool === 'cline' && (
             <CodeCard
-              title="پیکربندی OpenAI Compatible در Cline"
+              title="پیکربندی OpenAI Compatible در Cline و Roo Code"
               code={snippets.clineConfig}
               copied={copiedId === 'cline'}
               onCopy={() => void copyText('cline', snippets.clineConfig)}
             />
+          )}
+
+          {tool === 'opencode' && (
+            <>
+              <CodeCard
+                title={
+                  <>
+                    فایل <span dir="ltr" className="font-mono">opencode.json</span> (هارنس OpenCode)
+                  </>
+                }
+                code={snippets.opencodeConfig}
+                copied={copiedId === 'opencode'}
+                onCopy={() => void copyText('opencode', snippets.opencodeConfig)}
+              />
+              <CodeCard
+                title="اجرای Aider یا هر هارنس OpenAI-Compatible"
+                code={snippets.aiderCommand}
+                copied={copiedId === 'aider'}
+                onCopy={() => void copyText('aider', snippets.aiderCommand)}
+              />
+            </>
           )}
 
           {tool === '9router' && (
